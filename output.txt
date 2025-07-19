@@ -1,0 +1,7 @@
+
+=============== EVALUATION ===============
+
+Total queries: 100, top_k=10
+
+[Query 1] 3.7 The Lead Banks in the identified districts having concentration of minority communities may involve the State Minori ...
+[Dense]
