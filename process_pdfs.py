@@ -10,7 +10,6 @@
 
 import os
 import shutil
-import glob
 import re
 import random
 import numpy as np
@@ -23,6 +22,7 @@ from transformers import AutoTokenizer, AutoModel
 import torch.nn.functional as F
 
 from pymilvus import connections, FieldSchema, CollectionSchema, DataType, Collection, utility
+
 
 # Model being used for dense embeddings: Alibaba-NLP/gte-large-en-v1.5
 # Model being used for sparse embeddings: Bag of Words (BOW) with max 5000 words
@@ -43,7 +43,7 @@ def extract_text_pdfplumber(pdf_path):
         print(f"pdfplumber error: {e}")
         return None
 
-def extract_text_ocr(pdf_path, temp_dir="./_temp_images"):
+def extract_text_ocr(pdf_path, temp_dir="_temp_images"):
     os.makedirs(temp_dir, exist_ok=True)
     text = ''
     pages = convert_from_path(pdf_path, dpi=300, output_folder=temp_dir, fmt='png', thread_count=4)
@@ -70,21 +70,12 @@ def chunk_by_paragraph(
     text,
     min_length=200,
     max_length=1000,
-    hard_max_length=8000  # WELL UNDER MILVUS LIMIT TO BE SAFE
-    # Milvus limit: 16384 chars
+    hard_max_length=8000
 ):
-    """
-    if any problem persists, we can also try Content-Aware chunking
-        Define separators for different content types
-            paragraph_separator = r'\n\n+'
-            bullet_point_separator = r'\n- '
-            numbered_list_separator = r'\n\d+\. '
-    """
     import re
     lines = text.splitlines()
     paragraphs = []
     current = ""
-
     for line in lines:
         line = line.strip()
         is_section_header = (
@@ -102,7 +93,6 @@ def chunk_by_paragraph(
                     current = ""
             else:
                 current += " " + line
-
     if current.strip():
         paragraphs.append(current.strip())
 
@@ -120,7 +110,6 @@ def chunk_by_paragraph(
                 if len(sub) >= min_length:
                     chunks.append(sub)
             continue
-
         # Merge paras until limit reached
         if (
             len(tmp) + len(para) + 1 <= max_length
@@ -131,19 +120,14 @@ def chunk_by_paragraph(
             if len(tmp.strip()) >= min_length:
                 chunks.append(tmp.strip())
             tmp = para
-
     for ch in chunks:
-        assert len(ch) <= hard_max_length, f"WAARRNNIIINGG: Chunk exceeds hard max: {len(ch)}"
-
-
+        assert len(ch) <= hard_max_length
     if tmp.strip():
         for i in range(0, len(tmp.strip()), hard_max_length):
             sub = tmp.strip()[i:i+hard_max_length]
             if len(sub) >= min_length:
                 chunks.append(sub)
-
     return chunks
-
 
 # ---------- SPARSE VECTOR (BOW) ----------
 def build_vocab(texts, max_vocab=5000):
@@ -224,14 +208,14 @@ def create_collection(name, dense_dim, sparse_dim):
 # of a field-mapped dictionary, causing misaligned data insertion.
 
 def insert_to_milvus(collection, dense_vecs, sparse_vecs, texts):
-    # autogen id
-    entities = []
-    for i in range(len(texts)):
-        entities.append({
+    entities = [
+        {
             "dense": dense_vecs[i].tolist(),
             "sparse": sparse_vecs[i].tolist(),
             "text": texts[i]
-        })
+        }
+        for i in range(len(texts))
+    ]
     collection.insert(entities)
     collection.flush()
 
@@ -254,7 +238,6 @@ def hybrid_search(collection, embedder, vocab, query, top_k=10):
     sv = sparse_vector(query, vocab).reshape(1, -1)
     res_d = collection.search(dv.tolist(), "dense", {"metric_type":"L2", "params":{"nprobe":10}}, limit=top_k*2)
     res_s = collection.search(sv.tolist(), "sparse", {"metric_type":"L2", "params":{"nprobe":10}}, limit=top_k*2)
-    # merge by avg rank
     scores = {}
     for i, hit in enumerate(res_d[0]):
         scores[hit.id] = [hit.score, None, hit.entity.get("text")]
@@ -263,7 +246,6 @@ def hybrid_search(collection, embedder, vocab, query, top_k=10):
             scores[hit.id][1] = hit.score
         else:
             scores[hit.id] = [None, hit.score, hit.entity.get("text")]
-    # Combine: score = average of distances (lower is better in L2)
     hybrid = []
     for id_, (ds, ss, text) in scores.items():
         ds = ds if ds is not None else 10e6
@@ -275,6 +257,7 @@ def hybrid_search(collection, embedder, vocab, query, top_k=10):
 # ---------- EVALUATION OF RESULTS ----------
 # this will print results to console and also save to output file
 # it will run dense, sparse, and hybrid searches for each query
+
 def run_evaluation(collection, embedder, vocab, queries, top_k=10, output_file="output.txt"):
     def log(msg=""):
         print(msg)
@@ -290,21 +273,18 @@ def run_evaluation(collection, embedder, vocab, queries, top_k=10, output_file="
             log("[Dense]")
             res_d = dense_search(collection, embedder, query, top_k)
             for i, (id_, score, text) in enumerate(res_d, 1):
-                # Fix: Handle None text
                 text_preview = (text[:80].replace('\n',' ') if text else "No text available") + " ..."
                 log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text_preview}")
 
             log("[Sparse]")
             res_s = sparse_search(collection, vocab, query, top_k)
             for i, (id_, score, text) in enumerate(res_s, 1):
-                # Fix: Handle None text
                 text_preview = (text[:80].replace('\n',' ') if text else "No text available") + " ..."
                 log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text_preview}")
 
             log("[Hybrid]")
             res_h = hybrid_search(collection, embedder, vocab, query, top_k)
             for i, (id_, score, text) in enumerate(res_h, 1):
-                # Fix: Handle None text
                 text_preview = (text[:80].replace('\n',' ') if text else "No text available") + " ..."
                 log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text_preview}")
 
@@ -348,7 +328,7 @@ def main():
         return
 
     # ---- BOW VOCAB ----
-    print("Building sparse vocabulary (BOW)...")
+    print("Building sparse vocabulary (Bag Of Words)...")
     vocab = build_vocab(all_chunks, max_vocab=5000)
     print(f"Vocabulary size: {len(vocab)}")
 
@@ -376,10 +356,8 @@ def main():
     """
 
     BATCH = 8
-
     for start in range(0, len(all_chunks), BATCH):
         chunk_batch = all_chunks[start:start+BATCH]
-        # All chunks are safe (≤ hard_max_length), so direct encoding and insertion
         dense_vecs = embedder.encode(chunk_batch)
         sparse_vecs = np.array([sparse_vector(ch, vocab) for ch in chunk_batch])
         insert_to_milvus(collection, dense_vecs, sparse_vecs, chunk_batch)
@@ -392,9 +370,12 @@ def main():
     dense_queries = random.sample(all_chunks, min(100, len(all_chunks)))
     vocab_list = list(vocab.keys())
     sparse_queries = random.sample(vocab_list, min(100, len(vocab_list)))
-    hybrid_queries = random.sample(all_chunks, min(50, len(all_chunks))) + random.sample(vocab_list, min(50, len(vocab_list)))
-    print("Running evaluation (this may take time)...")
+    hybrid_queries = (
+        random.sample(all_chunks, min(50, len(all_chunks))) +
+        random.sample(vocab_list, min(50, len(vocab_list)))
+    )
 
+    print("Running evaluation (this may take time)...")
     print("\n=== Dense queries ===")
     run_evaluation(collection, embedder, vocab, dense_queries, top_k=10, output_file="output.txt")
 
@@ -407,3 +388,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Data insertion in insert_to_milvus() now only uses an explicit field-mapped dictionary for each record, 
+# guaranteeing the "text" field is always included alongside "dense" and "sparse".
