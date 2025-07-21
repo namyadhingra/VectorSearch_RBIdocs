@@ -69,10 +69,17 @@ Paragraph Chunking seems to be the best chunking method for our use case for the
 def chunk_by_paragraph(
     text,
     min_length=200,
-    max_length=1200,
-    hard_max_length=15000  # WELL UNDER MILVUS LIMIT TO BE SAFE
+    max_length=1000,
+    hard_max_length=8000  # WELL UNDER MILVUS LIMIT TO BE SAFE
     # Milvus limit: 16384 chars
 ):
+    """
+    if any problem persists, we can also try Content-Aware chunking
+        Define separators for different content types
+            paragraph_separator = r'\n\n+'
+            bullet_point_separator = r'\n- '
+            numbered_list_separator = r'\n\d+\. '
+    """
     import re
     lines = text.splitlines()
     paragraphs = []
@@ -194,6 +201,7 @@ class GTEEmbedder:
 # ---------- CONNECTING WITH MILVUS ETC. ----------
 def connect_milvus(host="localhost", port="19535"):
     connections.connect("default", host=host, port=port)
+
 def create_collection(name, dense_dim, sparse_dim):
     if utility.has_collection(name):
         utility.drop_collection(name)
@@ -210,15 +218,23 @@ def create_collection(name, dense_dim, sparse_dim):
     collection.load()
     return collection
 
+# changed insert_to_milvus on 19 Jul to debug "No Text Available" issue
+# this was caused by the fact that we were not converting dense/sparse vectors to lists before
+# Milvus stored None for the text field because insert_to_milvus() used an unnamed list instead
+# of a field-mapped dictionary, causing misaligned data insertion.
+
 def insert_to_milvus(collection, dense_vecs, sparse_vecs, texts):
     # autogen id
-    entities = [
-        dense_vecs.tolist(),
-        sparse_vecs.tolist(),
-        texts,
-    ]
+    entities = []
+    for i in range(len(texts)):
+        entities.append({
+            "dense": dense_vecs[i].tolist(),
+            "sparse": sparse_vecs[i].tolist(),
+            "text": texts[i]
+        })
     collection.insert(entities)
     collection.flush()
+
 
 # ---------- DEFINING SEARCH FUNCTIONS FOR DENSE, SPARSE, AND HYBRID SEARCH ----------
 def dense_search(collection, embedder, query, top_k=10):
@@ -274,17 +290,23 @@ def run_evaluation(collection, embedder, vocab, queries, top_k=10, output_file="
             log("[Dense]")
             res_d = dense_search(collection, embedder, query, top_k)
             for i, (id_, score, text) in enumerate(res_d, 1):
-                log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text[:80].replace('\n',' ')} ...")
+                # Fix: Handle None text
+                text_preview = (text[:80].replace('\n',' ') if text else "No text available") + " ..."
+                log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text_preview}")
 
             log("[Sparse]")
             res_s = sparse_search(collection, vocab, query, top_k)
             for i, (id_, score, text) in enumerate(res_s, 1):
-                log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text[:80].replace('\n',' ')} ...")
+                # Fix: Handle None text
+                text_preview = (text[:80].replace('\n',' ') if text else "No text available") + " ..."
+                log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text_preview}")
 
             log("[Hybrid]")
             res_h = hybrid_search(collection, embedder, vocab, query, top_k)
             for i, (id_, score, text) in enumerate(res_h, 1):
-                log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text[:80].replace('\n',' ')} ...")
+                # Fix: Handle None text
+                text_preview = (text[:80].replace('\n',' ') if text else "No text available") + " ..."
+                log(f"{i:02d} [ID:{id_}] Score:{score:.4f}  |  {text_preview}")
 
 
 # ---------- MAIN PIPELINE FOR OUR USE CASE ----------
